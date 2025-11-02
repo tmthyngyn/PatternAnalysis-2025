@@ -119,7 +119,11 @@ def main():
     plt.axis("off")
 
     plt.tight_layout()
-    plt.show()
+    os.makedirs("outputs", exist_ok=True)
+    save_path = "outputs/prediction_example.png"
+    plt.savefig(save_path)
+    print(f"[predict] Saved visualisation to {save_path}")
+
 
 
 if __name__ == "__main__":
