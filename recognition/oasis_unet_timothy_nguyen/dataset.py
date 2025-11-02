@@ -27,14 +27,18 @@ class OASIS2DSegmentation(Dataset):
         img_dir = os.path.join(self.root, f"keras_png_slices_{split}")
         seg_dir = os.path.join(self.root, f"keras_png_slices_seg_{split}")
 
-        if os.path.exists(img_dir) and os.path.exists(seg_dir):
+        colab_img_dir = os.path.join(self.root, split, "images")
+        colab_lbl_dir = os.path.join(self.root, split, "labels")
+
+        if os.path.exists(colab_img_dir) and os.path.exists(colab_lbl_dir):
+            self.imgs = sorted(glob.glob(os.path.join(colab_img_dir, "*.png")))
+            self.lbls = sorted(glob.glob(os.path.join(colab_lbl_dir, "*.png")))
+        elif os.path.exists(img_dir) and os.path.exists(seg_dir):
             self.imgs = sorted(glob.glob(os.path.join(img_dir, "*.png")))
             self.lbls = sorted(glob.glob(os.path.join(seg_dir, "*.png")))
         else:
-            # fall back to the old layout or fake mode
             self.imgs = []
             self.lbls = []
-
         self.fake_mode = len(self.imgs) == 0
         if self.fake_mode:
             self.length = 8  # small fake dataset
