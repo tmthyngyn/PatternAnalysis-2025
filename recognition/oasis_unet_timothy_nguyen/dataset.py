@@ -31,11 +31,11 @@ class OASIS2DSegmentation(Dataset):
         colab_lbl_dir = os.path.join(self.root, split, "labels")
 
         if os.path.exists(colab_img_dir) and os.path.exists(colab_lbl_dir):
-            self.imgs = sorted(glob.glob(os.path.join(colab_img_dir, "*.png")))
-            self.lbls = sorted(glob.glob(os.path.join(colab_lbl_dir, "*.png")))
+            self.imgs = sorted(glob.glob(os.path.join(colab_img_dir, "*.*png")))
+            self.lbls = sorted(glob.glob(os.path.join(colab_lbl_dir, "*.*png")))
         elif os.path.exists(img_dir) and os.path.exists(seg_dir):
-            self.imgs = sorted(glob.glob(os.path.join(img_dir, "*.png")))
-            self.lbls = sorted(glob.glob(os.path.join(seg_dir, "*.png")))
+            self.imgs = sorted(glob.glob(os.path.join(img_dir, "*.*png")))
+            self.lbls = sorted(glob.glob(os.path.join(seg_dir, "*.*png")))
         else:
             self.imgs = []
             self.lbls = []
