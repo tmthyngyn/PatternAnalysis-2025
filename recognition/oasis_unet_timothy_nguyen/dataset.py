@@ -45,7 +45,17 @@ class OASIS2DSegmentation(Dataset):
 
     def __len__(self):
         return self.length if self.fake_mode else len(self.imgs)
-
+    
+    def _remap_labels(self, lbl: np.ndarray) -> np.ndarray:
+        unique_vals = np.unique(lbl)
+        if unique_vals.min() >= 0 and unique_vals.max() < self.num_classes:
+            return lbl
+        if len(unique_vals) <= self.num_classes:
+            remap = {v: i for i, v in enumerate(sorted(unique_vals))}
+            lbl = np.vectorize(remap.get)(lbl).astype(np.int64)
+            return lbl
+        return np.clip(lbl, 0, self.num_classes - 1).astype(np.int64)
+    
     def __getitem__(self, idx):
         if self.fake_mode:
             img = np.random.randn(1, 256, 256).astype(np.float32)
@@ -65,5 +75,6 @@ class OASIS2DSegmentation(Dataset):
 
         # channel-first
         img = np.expand_dims(img, 0)
+        lbl = self._remap_labels(lbl)
 
         return torch.from_numpy(img), torch.from_numpy(lbl)
