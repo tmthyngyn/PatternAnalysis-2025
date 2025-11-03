@@ -68,6 +68,7 @@ def build_model(num_classes: int, device: torch.device) -> nn.Module:
     # Raise an error if neither model is found
     raise RuntimeError("No compatible model found in modules.py (expected UNet or UNet2D).")
 
+@torch.no_grad()
 def dice_per_class(pred_logits: torch.Tensor, target: torch.Tensor, num_classes: int) -> torch.Tensor:
     """
     Compute mean per-class Dice score for a batch.
@@ -177,6 +178,29 @@ def train_one_epoch(
         n_batches += 1
     return total_loss / max(n_batches, 1), total_dice / max(n_batches, 1)
 
+@torch.no_grad()
+def dice_intersections_unions(
+    logits: torch.Tensor, target: torch.Tensor, num_classes: int
+):
+    """
+    Return per-class intersection and (|P| + |T|) sums for a batch.
+    Accumulate these across batches to compute dataset-level per-class Dice.
+    """
+    # logits -> predicted labels
+    pred = torch.argmax(logits, dim=1)  # (N,H,W)
+
+    # one-hot: (N,C,H,W)
+    n, h, w = pred.shape
+    pred_1h = torch.zeros((n, num_classes, h, w), device=pred.device, dtype=torch.float32)
+    tgt_1h  = torch.zeros_like(pred_1h)
+    pred_1h.scatter_(1, pred.unsqueeze(1), 1.0)
+    tgt_1h.scatter_(1, target.unsqueeze(1), 1.0)
+
+    inter = (pred_1h * tgt_1h).sum(dim=(0, 2, 3))                     # (C,)
+    sums  = pred_1h.sum(dim=(0, 2, 3)) + tgt_1h.sum(dim=(0, 2, 3))    # (C,)
+    return inter, sums
+
+@torch.no_grad()
 def validate(
     model: nn.Module,
     criterion: nn.Module,
@@ -186,6 +210,7 @@ def validate(
 ) -> Tuple[float, float]:
     """
     Evaluate the model on the validation split.
+    Prints dataset-level per-class Dice (aggregated correctly across batches).
 
     Returns
     -------
@@ -194,8 +219,12 @@ def validate(
     """
     model.eval()
     total_loss = 0.0
-    total_dice = 0.0
     n_batches = 0
+
+    # Accumulate numerators/denominators for per-class Dice across the dataset
+    inter_total = torch.zeros(num_classes, device=device, dtype=torch.float64)
+    sums_total  = torch.zeros(num_classes, device=device, dtype=torch.float64)
+
     for imgs, masks in loader:
         imgs = imgs.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
@@ -203,13 +232,23 @@ def validate(
         logits = model(imgs)
         loss = criterion(logits, masks)
 
-        per_class = dice_per_class(logits, masks, num_classes)
-        mean_dice = float(per_class.mean().item())
-
         total_loss += float(loss.item())
-        total_dice += mean_dice
         n_batches += 1
-    return total_loss / max(n_batches, 1), total_dice / max(n_batches, 1)
+
+        inter, sums = dice_intersections_unions(logits, masks, num_classes)
+        inter_total += inter.to(torch.float64)
+        sums_total  += sums.to(torch.float64)
+
+    eps = 1e-6
+    per_class_dice = (2.0 * inter_total + eps) / (sums_total + eps)  # (C,)
+    mean_dice = float(per_class_dice.mean().item())
+    avg_loss = total_loss / max(n_batches, 1)
+
+    # Pretty print per-class Dice for this epoch
+    pcs = per_class_dice.detach().cpu().tolist()
+    print("  Val per-class Dice:", ", ".join(f"C{c}: {d:.4f}" for c, d in enumerate(pcs)))
+
+    return avg_loss, mean_dice
 
 # -----------------------------
 # Main entry point

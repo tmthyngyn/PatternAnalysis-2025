@@ -23,7 +23,18 @@ import matplotlib.pyplot as plt
 # Local imports
 from dataset import OASIS2DSegmentation
 import modules
+import numpy as np
 
+def dice_per_class_np(y_true: np.ndarray, y_pred: np.ndarray, num_classes: int) -> list[float]:
+    """Compute per-class Dice for a single predicted mask (numpy arrays)."""
+    dices = []
+    for c in range(num_classes):
+        t = (y_true == c)
+        p = (y_pred == c)
+        inter = np.logical_and(t, p).sum()
+        denom = t.sum() + p.sum()
+        dices.append(1.0 if denom == 0 else (2.0 * inter) / denom)
+    return dices
 
 def build_model(num_classes: int, device: torch.device) -> nn.Module:
     """
@@ -99,7 +110,7 @@ def load_checkpoint(model: nn.Module, ckpt_path: Path):
     model.load_state_dict(state, strict=False)  # Load weights into the model
     return ckpt
 
-
+@torch.no_grad()
 def predict_one(model: nn.Module, img: torch.Tensor) -> torch.Tensor:
     """
     Perform forward pass on a single image tensor.
@@ -205,7 +216,12 @@ def main():
     pred_np = pred_t.cpu().numpy()           # (H,W) int
     # Render and save visualization
     render_triplet(img_np, gt_np, pred_np, Path(args.out))
+    # Compute per-class Dice on this prediction
+    per_class = dice_per_class_np(gt_np, pred_np, num_classes=args.num_classes)
+    print("Per-class Dice (single example):", ", ".join(f"C{c}: {d:.4f}" for c, d in enumerate(per_class)))
+    print("Mean Dice (single example):", f"{np.mean(per_class):.4f}")
     print(f"Saved visualisation to: {args.out}")
+
 
 
 if __name__ == "__main__":

@@ -217,7 +217,8 @@ class OASIS2DSegmentation(Dataset):
     def __len__(self) -> int:
         """Return number of (image, label) pairs in this dataset split."""
         return len(self.pairs)
-
+    
+    @staticmethod
     def _zscore(arr: np.ndarray) -> np.ndarray:
         """Apply z-score normalization to image array."""
         m = float(arr.mean())
