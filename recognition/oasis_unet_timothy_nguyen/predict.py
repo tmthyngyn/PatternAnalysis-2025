@@ -1,4 +1,3 @@
-
 """
 Prediction and visualisation for trained 2D U-Net on OASIS PNG slices.
 
@@ -6,8 +5,9 @@ Overview
 --------
 - Loads dataset (OASIS2DSegmentation) in PNG format.
 - Rebuilds model from modules.py and loads the saved checkpoint.
-- Runs inference on a selected image slice.
+- Runs inference on a selected image slice OR the entire split (--scan mode).
 - Saves a side-by-side figure showing input, ground truth, and prediction.
+- Optionally identifies best, worst, and median Dice predictions when scanning.
 
 This script helps verify that the model produces reasonable segmentations after training.
 """
@@ -23,7 +23,6 @@ import matplotlib.pyplot as plt
 # Local imports
 from dataset import OASIS2DSegmentation
 import modules
-import numpy as np
 
 def dice_per_class_np(y_true: np.ndarray, y_pred: np.ndarray, num_classes: int) -> list[float]:
     """Compute per-class Dice for a single predicted mask (numpy arrays)."""
@@ -54,11 +53,9 @@ def build_model(num_classes: int, device: torch.device) -> nn.Module:
     """
     if hasattr(modules, "UNet"):
         try:
-            # Attempt to construct model using keyword args
             m = modules.UNet(in_channels=1, out_channels=num_classes)
             return m.to(device)
         except TypeError:
-            # Fallback for constructors that take no arguments
             m = modules.UNet().to(device)
             return m
     if hasattr(modules, "UNet2D"):
@@ -68,7 +65,6 @@ def build_model(num_classes: int, device: torch.device) -> nn.Module:
         except TypeError:
             m = modules.UNet2D().to(device)
             return m
-    # If neither UNet nor UNet2D exists, raise a runtime error
     raise RuntimeError("No compatible model found in modules.py (expected UNet or UNet2D).")
 
 def parse_args():
@@ -87,6 +83,7 @@ def parse_args():
     p.add_argument("--out", type=str, default="outputs/prediction_example.png")
     p.add_argument("--split", type=str, default="val", choices=["train", "val", "test"])
     p.add_argument("--index", type=int, default=0, help="Dataset index to visualise")
+    p.add_argument("--scan", action="store_true", help="Scan full split to find best/worst/median Dice examples")
     return p.parse_args()
 
 def load_checkpoint(model: nn.Module, ckpt_path: Path):
@@ -133,7 +130,7 @@ def predict_one(model: nn.Module, img: torch.Tensor) -> torch.Tensor:
     pred = logits.argmax(dim=1)[0]  # Convert to predicted label map (H,W)
     return pred.cpu()  # Return prediction on CPU for visualization
 
-def render_triplet(img: np.ndarray, gt: np.ndarray, pred: np.ndarray, save_path: Path):
+def render_triplet(img: np.ndarray, gt: np.ndarray, pred: np.ndarray, save_path: Path, title: str = ""):
     """
     Render a triplet of input image, ground-truth, and prediction.
 
@@ -147,27 +144,26 @@ def render_triplet(img: np.ndarray, gt: np.ndarray, pred: np.ndarray, save_path:
         Predicted label mask (H,W).
     save_path : Path
         Path where the resulting visualization will be saved.
+    title : str, optional
+        Optional title for figure (used in scan mode).
     """
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    # Create a 3-panel matplotlib figure
     plt.figure(figsize=(12, 4))
-    # Panel 1: Input grayscale image
     plt.subplot(1, 3, 1)
     plt.imshow(img, cmap="gray")
     plt.title("Input")
     plt.axis("off")
-    # Panel 2: Ground truth segmentation
     plt.subplot(1, 3, 2)
     plt.imshow(gt, interpolation="nearest")
     plt.title("Ground Truth")
     plt.axis("off")
-    # Panel 3: Model prediction
     plt.subplot(1, 3, 3)
     plt.imshow(pred, interpolation="nearest")
     plt.title("Prediction")
     plt.axis("off")
-    # Save visualization
-    plt.tight_layout()
+    if title:
+        plt.suptitle(title)
+    plt.tight_layout(rect=[0, 0, 1, 0.96] if title else None)
     plt.savefig(save_path)
     plt.close()
 
@@ -180,8 +176,8 @@ def main():
     1. Parse command-line arguments.
     2. Load the OASIS dataset (PNG backend).
     3. Rebuild the model and load checkpoint weights.
-    4. Perform prediction on one example.
-    5. Render and save a visualization figure.
+    4. Perform prediction on one example (default).
+    5. Or scan full split (--scan) to export best, worst, and median examples.
     """
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -192,13 +188,9 @@ def main():
     except FileNotFoundError as e:
         print(str(e))
         sys.exit(2)
-    # Exit gracefully if dataset is empty
     if len(ds) == 0:
         print(f"No data found in split '{args.split}' under {args.root}.")
         sys.exit(2)
-    # Select sample index (clamped to dataset length)
-    idx = max(0, min(args.index, len(ds) - 1))
-    img_t, gt_t = ds[idx]  # Get one sample (image, ground truth mask)
     # Build and load model checkpoint
     model = build_model(args.num_classes, device)
     ckpt_path = Path(args.ckpt)
@@ -206,24 +198,68 @@ def main():
         print(f"Checkpoint not found at: {ckpt_path}")
         sys.exit(2)
     load_checkpoint(model, ckpt_path)
-    model.eval()  # Set model to evaluation mode (disables dropout/batchnorm updates)
-    # Run inference on selected sample
-    img_in = img_t.unsqueeze(0).to(device)  # Add batch dimension -> (1,1,H,W)
-    pred_t = predict_one(model, img_in)     # Get predicted segmentation mask
-    # Convert tensors to numpy for visualization
-    img_np = img_t.squeeze(0).cpu().numpy()  # (H,W) float32
-    gt_np = gt_t.cpu().numpy()               # (H,W) int
-    pred_np = pred_t.cpu().numpy()           # (H,W) int
-    # Render and save visualization
-    render_triplet(img_np, gt_np, pred_np, Path(args.out))
-    # Compute per-class Dice on this prediction
-    per_class = dice_per_class_np(gt_np, pred_np, num_classes=args.num_classes)
-    print("Per-class Dice (single example):", ", ".join(f"C{c}: {d:.4f}" for c, d in enumerate(per_class)))
-    print("Mean Dice (single example):", f"{np.mean(per_class):.4f}")
-    print(f"Saved visualisation to: {args.out}")
+    model.eval()
+    # --------------------------------------
+    # Mode 1: Single example (default)
+    # --------------------------------------
+    if not args.scan:
+        idx = max(0, min(args.index, len(ds) - 1))
+        img_t, gt_t = ds[idx]
+        img_in = img_t.unsqueeze(0).to(device)
+        pred_t = predict_one(model, img_in)
 
+        img_np = img_t.squeeze(0).cpu().numpy()
+        gt_np = gt_t.cpu().numpy()
+        pred_np = pred_t.cpu().numpy()
+
+        render_triplet(img_np, gt_np, pred_np, Path(args.out))
+        per_class = dice_per_class_np(gt_np, pred_np, num_classes=args.num_classes)
+        print("Per-class Dice (single example):", ", ".join(f"C{c}: {d:.4f}" for c, d in enumerate(per_class)))
+        print("Mean Dice (single example):", f"{np.mean(per_class):.4f}")
+        print(f"Saved visualisation to: {args.out}")
+        return
+    # --------------------------------------
+    # Mode 2: Scan entire split (--scan)
+    # --------------------------------------
+    outdir = Path("outputs/gallery")
+    outdir.mkdir(parents=True, exist_ok=True)
+    print(f"Scanning {len(ds)} samples from split '{args.split}'...")
+    scores = []
+    cache = {}
+    with torch.no_grad():
+        for idx in range(len(ds)):
+            img_t, gt_t = ds[idx]
+            img_in = img_t.unsqueeze(0).to(device)
+            pred_t = predict_one(model, img_in)
+            img_np = img_t.squeeze(0).cpu().numpy()
+            gt_np = gt_t.cpu().numpy()
+            pred_np = pred_t.cpu().numpy()
+            per_class = dice_per_class_np(gt_np, pred_np, args.num_classes)
+            mean_dice = float(np.mean(per_class))
+            scores.append((mean_dice, idx))
+            cache[idx] = {"img": img_np, "gt": gt_np, "pred": pred_np, "per_class": per_class}
+    # Sort and pick best/worst/median
+    scores.sort(key=lambda x: x[0])
+    worst_score, worst_idx = scores[0]
+    best_score, best_idx = scores[-1]
+    med_target = np.median([s for s, _ in scores])
+    decent_idx = min(scores, key=lambda x: abs(x[0] - med_target))[1]
+    decent_score = [s for s, i in scores if i == decent_idx][0]
+    # Save figures
+    for name, idx, score in [
+        ("best", best_idx, best_score),
+        ("worst", worst_idx, worst_score),
+        ("decent", decent_idx, decent_score),
+    ]:
+        item = cache[idx]
+        title = f"{name.title()} — idx {idx} | mean Dice {score:.4f} | per-class: {', '.join(f'{x:.3f}' for x in item['per_class'])}"
+        render_triplet(item["img"], item["gt"], item["pred"], outdir / f"{name}.png", title)
+    print(f"Saved examples to {outdir}/")
+    print(f"  Best   (idx={best_idx})   mean Dice={best_score:.4f}")
+    print(f"  Worst  (idx={worst_idx})  mean Dice={worst_score:.4f}")
+    print(f"  Decent (idx={decent_idx}) mean Dice={decent_score:.4f}")
+    print("Per-class labels: C0=Background, C1=CSF, C2=Gray Matter, C3=White Matter")
 
 
 if __name__ == "__main__":
-    # When executed directly, run the main() function
     main()
