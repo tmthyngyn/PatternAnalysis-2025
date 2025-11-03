@@ -1,20 +1,19 @@
+# predict.py
 import os
 import sys
-import torch
+import argparse
+from pathlib import Path
+
 import numpy as np
+import torch
+import torch.nn as nn
 import matplotlib.pyplot as plt
 
-# make sure we import our local modules, not random pip ones
-THIS_DIR = os.path.dirname(__file__)
-if THIS_DIR not in sys.path:
-    sys.path.insert(0, THIS_DIR)
-
-from dataset import OASIS2DSegmentation, guess_oasis_root
-import modules  # to get UNet / UNet2D
+from dataset import OASIS2DSegmentation
+import modules
 
 
-def build_model(num_classes: int, device: torch.device):
-    # same defensive builder we used in train.py
+def build_model(num_classes: int, device: torch.device) -> nn.Module:
     if hasattr(modules, "UNet"):
         try:
             m = modules.UNet(in_channels=1, out_channels=num_classes)
@@ -31,99 +30,108 @@ def build_model(num_classes: int, device: torch.device):
             m = modules.UNet2D().to(device)
             return m
 
-    raise RuntimeError("Could not find UNet / UNet2D in modules.py")
+    raise RuntimeError("No compatible model found in modules.py (expected UNet or UNet2D).")
 
 
-def load_checkpoint(model: torch.nn.Module, ckpt_path: str, device: torch.device):
-    ckpt = torch.load(ckpt_path, map_location=device)
-
-    # case 1: it's a full checkpoint (what train.py saved)
-    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-        model.load_state_dict(ckpt["model_state_dict"])
-        print(f"[predict] Loaded model_state_dict from checkpoint: {ckpt_path}")
-    else:
-        # case 2: it's a bare state_dict
-        model.load_state_dict(ckpt)
-        print(f"[predict] Loaded raw state_dict: {ckpt_path}")
-
-    return model
+def parse_args():
+    p = argparse.ArgumentParser(description="Predict/visualise using trained UNet on OASIS")
+    p.add_argument("--root", type=str, default="./OASIS", help="Path to OASIS/ canonical tree")
+    p.add_argument("--num-classes", type=int, default=4)
+    p.add_argument("--ckpt", type=str, default="trained_models/oasis_unet/best_model.pth")
+    p.add_argument("--out", type=str, default="outputs/prediction_example.png")
+    p.add_argument("--split", type=str, default="val", choices=["train", "val", "test"])
+    p.add_argument("--index", type=int, default=0, help="Dataset index to visualise")
+    return p.parse_args()
 
 
-def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("[predict] Using device:", device)
+def load_checkpoint(model: nn.Module, ckpt_path: Path):
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    state = ckpt.get("model_state", ckpt)
+    model.load_state_dict(state, strict=False)
+    return ckpt
 
-    data_root = guess_oasis_root()
-    print("[predict] Using dataset root:", data_root)
 
-    # try to find a checkpoint in the usual places
-    candidate_ckpts = [
-        "trained_models/oasis_unet/best_model.pth",
-        "checkpoints/oasis_unet.pth",
-    ]
-    ckpt_path = None
-    for p in candidate_ckpts:
-        if os.path.exists(p):
-            ckpt_path = p
-            break
+@torch.no_grad()
+def predict_one(model: nn.Module, img: torch.Tensor) -> torch.Tensor:
+    """
+    img: (1,1,H,W) or (1,H,W) -> ensures batch dimension
+    returns: (H,W) argmax mask
+    """
+    if img.ndim == 3:
+        img = img.unsqueeze(0)  # (1,1,H,W)
+    logits = model(img)  # (1,C,H,W)
+    pred = logits.argmax(dim=1)[0]  # (H,W)
+    return pred.cpu()
 
-    if ckpt_path is None:
-        raise FileNotFoundError(
-            "No checkpoint found. Looked in: "
-            + ", ".join(candidate_ckpts)
-        )
 
-    # build dataset (just grab a few samples)
-    ds = OASIS2DSegmentation(
-        root=data_root,
-        split="train",      # or "test" if you add it later
-        norm=True,
-        num_classes=4,
-        backend="png",
-    )
-    print(f"[predict] Dataset len={len(ds)}, fake_mode={ds.fake_mode}")
-
-    # build model and load weights
-    model = build_model(num_classes=4, device=device)
-    model = load_checkpoint(model, ckpt_path, device)
-    model.eval()
-
-    # pick an index to visualise
-    idx = 0
-    img, gt = ds[idx]     # img: (1,H,W), gt: (H,W)
-    img_in = img.unsqueeze(0).to(device)  # (1,1,H,W)
-
-    with torch.no_grad():
-        logits = model(img_in)            # (1,C,H,W)
-        pred = torch.argmax(logits, dim=1).cpu().squeeze(0).numpy()
-
-    # convert GT to numpy
-    gt = gt.numpy()
-    img_vis = img.squeeze(0).numpy()
-
-    # plot
-    plt.figure(figsize=(10, 4))
+def render_triplet(img: np.ndarray, gt: np.ndarray, pred: np.ndarray, save_path: Path):
+    """
+    img:  (H,W) float32 (z-scored)
+    gt:   (H,W) int
+    pred: (H,W) int
+    """
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.figure(figsize=(12, 4))
     plt.subplot(1, 3, 1)
-    plt.imshow(img_vis, cmap="gray")
-    plt.title("image")
+    plt.imshow(img, cmap="gray")
+    plt.title("Input")
     plt.axis("off")
 
     plt.subplot(1, 3, 2)
-    plt.imshow(gt, cmap="viridis", vmin=0, vmax=3)
-    plt.title("gt")
+    plt.imshow(gt, interpolation="nearest")
+    plt.title("Ground Truth")
     plt.axis("off")
 
     plt.subplot(1, 3, 3)
-    plt.imshow(pred, cmap="viridis", vmin=0, vmax=3)
-    plt.title("pred")
+    plt.imshow(pred, interpolation="nearest")
+    plt.title("Prediction")
     plt.axis("off")
 
     plt.tight_layout()
-    os.makedirs("outputs", exist_ok=True)
-    save_path = "outputs/prediction_example.png"
     plt.savefig(save_path)
-    print(f"[predict] Saved visualisation to {save_path}")
+    plt.close()
 
+
+def main():
+    args = parse_args()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Dataset (enforced canonical layout)
+    try:
+        ds = OASIS2DSegmentation(root=args.root, split=args.split,
+                                 num_classes=args.num_classes, norm=True)
+    except FileNotFoundError as e:
+        print(str(e))
+        sys.exit(2)
+
+    if len(ds) == 0:
+        print(f"No data found in split '{args.split}' under {args.root}.")
+        sys.exit(2)
+
+    idx = max(0, min(args.index, len(ds) - 1))
+    img_t, gt_t = ds[idx]  # img: (1,H,W) float32, gt: (H,W) long
+
+    # Build/load model
+    model = build_model(args.num_classes, device)
+    ckpt_path = Path(args.ckpt)
+    if not ckpt_path.exists():
+        print(f"Checkpoint not found at: {ckpt_path}")
+        sys.exit(2)
+
+    load_checkpoint(model, ckpt_path)
+    model.eval()
+
+    # Predict
+    img_in = img_t.unsqueeze(0).to(device)  # (1,1,H,W)
+    pred_t = predict_one(model, img_in)
+
+    # Render
+    img_np = img_t.squeeze(0).cpu().numpy()
+    gt_np = gt_t.cpu().numpy()
+    pred_np = pred_t.cpu().numpy()
+
+    render_triplet(img_np, gt_np, pred_np, Path(args.out))
+    print(f"Saved visualisation to: {args.out}")
 
 
 if __name__ == "__main__":
