@@ -1,300 +1,252 @@
-import os, glob, re
+# dataset.py  —  Simplified PNG-only version (no NIfTI support)
+
+import os
+import re
+import glob
+from typing import List, Tuple, Optional
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
 
-# try to use our own utils (for NIfTI), but don't die if it's not there yet
-try:
-    import utils as ds_utils
-except ImportError:
-    ds_utils = None
 
-# known dataset roots
-RANGPUR_OASIS = "/home/groups/comp3710/OASIS"
-COLAB_OASIS   = "/content/drive/MyDrive/comp3710/OASIS"
+# ---------------------------------------------------------------------
+# Expected canonical layout
+#
+# OASIS/
+#   train/
+#     images/
+#     labels/
+#   val/
+#     images/
+#     labels/
+#   test/
+#     images/
+#     labels/
+# ---------------------------------------------------------------------
 
-
-def guess_oasis_root():
-    """
-    Try to guess where the OASIS data lives.
-    Priority:
-    1. OASIS_DIR env var
-    2. Colab default path
-    3. Rangpur path
-    4. local ./data/OASIS
-    """
-    if "OASIS_DIR" in os.environ:
-        return os.environ["OASIS_DIR"]
-    if os.path.exists(COLAB_OASIS):
-        return COLAB_OASIS
-    if os.path.exists(RANGPUR_OASIS):
-        return RANGPUR_OASIS
-    return "./data/OASIS"
+EXPECTED_SPLITS = ("train", "val", "test")
 
 
-def natural_sort_key(path: str):
-    """
-    Sort filenames like ..._2.nii.png before ..._10.nii.png.
-    """
-    return [int(t) if t.isdigit() else t.lower()
-            for t in re.findall(r"\d+|\D+", os.path.basename(path))]
+def _enforce_oasis_layout(root: str) -> None:
+    """Ensure canonical OASIS/ layout with required split folders."""
+    missing = []
+    for split in EXPECTED_SPLITS:
+        split_dir = os.path.join(root, split)
+        if not os.path.isdir(split_dir):
+            missing.append(f"{split}/")
+    if missing:
+        msg = [
+            f"[OASIS layout error] Expected canonical layout under: {os.path.abspath(root)}",
+            "",
+            "Required folder structure:",
+            "  OASIS/",
+            "    train/images/",
+            "    train/labels/",
+            "    val/images/",
+            "    val/labels/",
+            "    test/images/",
+            "    test/labels/",
+            "",
+            "Missing split folders:",
+        ] + [f"  - {m}" for m in missing]
+        raise FileNotFoundError("\n".join(msg))
 
 
+# ---------------------------------------------------------------------
+# PNG pairing
+# ---------------------------------------------------------------------
+
+# Accept patterns like:
+#   images: case_367_slice_20.nii.png  OR case_367_slice_20.png
+#   labels: seg_367_slice_20.nii.png   OR seg_367_slice_20.png
+_RX_NII_PNG = re.compile(
+    r"^(?P<prefix>case|img|image|seg|label)?_?(?P<pid>\d+)_slice_(?P<sid>\d+)\.nii\.png$",
+    re.IGNORECASE,
+)
+_RX_PNG = re.compile(
+    r"^(?P<prefix>case|img|image|seg|label)?_?(?P<pid>\d+)_slice_(?P<sid>\d+)\.png$",
+    re.IGNORECASE,
+)
+
+
+def _list_pngs(d: str) -> List[str]:
+    return sorted(glob.glob(os.path.join(d, "*.png")) + glob.glob(os.path.join(d, "*.PNG")))
+
+
+def _parse_png_key(path: str) -> Tuple[Optional[str], Optional[bool]]:
+    """Return (key, is_label) from a PNG filename or (None, None) if no match."""
+    b = os.path.basename(path)
+    m = _RX_NII_PNG.match(b) or _RX_PNG.match(b)
+    if not m:
+        return None, None
+    pid = m.group("pid")
+    sid = m.group("sid")
+    prefix = (m.group("prefix") or "").lower()
+    is_label = prefix in {"seg", "label"}
+    return f"{pid}_{sid}", is_label
+
+
+def _pair_pngs(images_dir: str, labels_dir: str) -> List[Tuple[str, str]]:
+    img_paths = _list_pngs(images_dir)
+    lbl_paths = _list_pngs(labels_dir)
+
+    by_key_img, bad_img = {}, []
+    for p in img_paths:
+        k, is_label = _parse_png_key(p)
+        if k is None or is_label:
+            bad_img.append(os.path.basename(p))
+        else:
+            by_key_img[k] = p
+
+    by_key_lbl, bad_lbl = {}, []
+    for p in lbl_paths:
+        k, is_label = _parse_png_key(p)
+        if k is None or not is_label:
+            bad_lbl.append(os.path.basename(p))
+        else:
+            by_key_lbl[k] = p
+
+    common = sorted(set(by_key_img).intersection(by_key_lbl))
+    pairs = [(by_key_img[k], by_key_lbl[k]) for k in common]
+
+    if not pairs:
+        msg = [
+            "No paired .png files found.",
+            f"Images dir: {images_dir} (count={len(img_paths)})",
+            f"Labels dir: {labels_dir} (count={len(lbl_paths)})",
+        ]
+        img_only = sorted(set(by_key_img) - set(by_key_lbl))
+        lbl_only = sorted(set(by_key_lbl) - set(by_key_img))
+        if img_only:
+            msg.append("\nImage keys without matching labels (first 10):")
+            msg += [f"  - {k}" for k in img_only[:10]]
+        if lbl_only:
+            msg.append("\nLabel keys without matching images (first 10):")
+            msg += [f"  - {k}" for k in lbl_only[:10]]
+        if bad_img:
+            msg.append("\nUnparsable / misplaced files in images/ (first 10):")
+            msg += [f"  - {n}" for n in bad_img[:10]]
+        if bad_lbl:
+            msg.append("\nUnparsable / misplaced files in labels/ (first 10):")
+            msg += [f"  - {n}" for n in bad_lbl[:10]]
+        msg.append(
+            "\nExpected filename patterns like:\n"
+            "  images: case_<PID>_slice_<SID>.nii.png  or  case_<PID>_slice_<SID>.png\n"
+            "  labels: seg_<PID>_slice_<SID>.nii.png   or  seg_<PID>_slice_<SID>.png"
+        )
+        raise FileNotFoundError("\n".join(msg))
+
+    leftover_img = sorted(set(by_key_img) - set(common))
+    leftover_lbl = sorted(set(by_key_lbl) - set(common))
+    if leftover_img or leftover_lbl or bad_img or bad_lbl:
+        print("[warn] PNG: some files were not paired or were unparsable.")
+        if leftover_img:
+            print(f"  Unpaired images: {len(leftover_img)} (showing up to 5)")
+            for k in leftover_img[:5]:
+                print("   -", os.path.basename(by_key_img[k]))
+        if leftover_lbl:
+            print(f"  Unpaired labels: {len(leftover_lbl)} (showing up to 5)")
+            for k in leftover_lbl[:5]:
+                print("   -", os.path.basename(by_key_lbl[k]))
+        if bad_img:
+            print(f"  Bad images entries: {len(bad_img)} (showing up to 5)")
+            for n in bad_img[:5]:
+                print("   -", n)
+        if bad_lbl:
+            print(f"  Bad labels entries: {len(bad_lbl)} (showing up to 5)")
+            for n in bad_lbl[:5]:
+                print("   -", n)
+
+    return pairs
+
+
+# ---------------------------------------------------------------------
+# Dataset
+# ---------------------------------------------------------------------
 class OASIS2DSegmentation(Dataset):
     """
-    2D OASIS dataset loader with:
-      - PNG support (your current workflow)
-      - optional NIfTI support (to match COMP3710 appendix style)
-      - helper utils for plotting and class-weight calculation
+    Canonicalised OASIS 2D dataset (PNG-only).
+    Expects each split to contain 'images/' and 'labels/' folders.
 
-    Parameters
-    ----------
-    root : str, optional
-        Dataset root folder. If None, will call guess_oasis_root().
-    split : str, optional
-        'train', 'test', or 'val' depending on your folder structure.
-    norm : bool, optional
-        If True, normalise images to zero mean / unit variance.
-    num_classes : int, optional
-        Number of segmentation classes.
-    backend : str, optional
-        'png' (default): look for PNGs in <root>/<split>/images + <root>/<split>/labels
-        'nifti': load 2D NIfTI slices via utils.load_data_2D_from_directory(...)
+    Returns:
+      image: (1,H,W) float32, z-scored if norm=True
+      mask:  (H,W)   int64 with labels in [0..num_classes-1]
     """
 
-    def __init__(self,
-                 root: str | None = None,
-                 split: str = "train",
-                 norm: bool = True,
-                 num_classes: int = 4,
-                 backend: str = "png"):
-
-        self.root = root or guess_oasis_root()
+    def __init__(
+        self,
+        root: str = "./OASIS",
+        split: str = "train",
+        num_classes: int = 4,
+        norm: bool = True,
+    ):
+        super().__init__()
+        assert split in EXPECTED_SPLITS, f"split must be one of {EXPECTED_SPLITS}"
+        self.root = root
         self.split = split
-        self.norm = norm
-        self.num_classes = num_classes
-        self.backend = backend
+        self.num_classes = int(num_classes)
+        self.norm = bool(norm)
 
-        # ------------------------------------------------------------------
-        # 1) COLAB layout  : <root>/<split>/images  +  <root>/<split>/labels
-        # 2) RANGPUR layout: <root>/keras_png_slices_<split>  +  <root>/keras_png_slices_seg_<split>
-        # 3) NIFTI layout  : handled via utils (only if backend='nifti')
-        # ------------------------------------------------------------------
-        colab_img_dir   = os.path.join(self.root, split, "images")
-        colab_lbl_dir   = os.path.join(self.root, split, "labels")
-        rangpur_img_dir = os.path.join(self.root, f"keras_png_slices_{split}")
-        rangpur_lbl_dir = os.path.join(self.root, f"keras_png_slices_seg_{split}")
+        _enforce_oasis_layout(self.root)
 
-        # ------------------------------------------------------------------
-        # BACKEND: NIfTI mode
-        # ------------------------------------------------------------------
-        if self.backend == "nifti":
-            if ds_utils is None:
-                raise RuntimeError(
-                    "backend='nifti' was requested but utils.py could not be imported. "
-                    "Add utils.py (we will write it next) or use backend='png'."
-                )
-
-            # we'll expect e.g. <root>/<split>/images_nifti and <root>/<split>/labels_nifti
-            nifti_img_dir = os.path.join(self.root, split, "images_nifti")
-            nifti_lbl_dir = os.path.join(self.root, split, "labels_nifti")
-
-            if not (os.path.exists(nifti_img_dir) and os.path.exists(nifti_lbl_dir)):
-                raise FileNotFoundError(
-                    f"NIfTI backend selected but could not find:\n{nifti_img_dir}\n{nifti_lbl_dir}"
-                )
-
-            # this will return np arrays, we keep them in memory (small 2D slices)
-            self.imgs = ds_utils.load_data_2D_from_directory(
-                nifti_img_dir,
-                norm_image=norm,
-                one_hot=False,
-                resized=False,
-                resizing_masks=False,
-                dtype=np.float32,
-            )
-            self.lbls = ds_utils.load_data_2D_from_directory(
-                nifti_lbl_dir,
-                norm_image=False,
-                one_hot=False,
-                resized=False,
-                resizing_masks=True,   # nearest for masks
-                dtype=np.int64,
+        img_dir = os.path.join(self.root, split, "images")
+        lbl_dir = os.path.join(self.root, split, "labels")
+        if not (os.path.isdir(img_dir) and os.path.isdir(lbl_dir)):
+            raise FileNotFoundError(
+                f"Missing required subfolders under {split}/. "
+                f"Expected 'images/' and 'labels/' inside {os.path.join(self.root, split)}."
             )
 
-            if self.imgs.shape[0] != self.lbls.shape[0]:
-                raise ValueError("NIfTI images and labels have different lengths")
+        self.pairs = _pair_pngs(img_dir, lbl_dir)
+        if not self.pairs:
+            raise FileNotFoundError(f"No valid image/label pairs found in split '{split}'.")
 
-            self.fake_mode = False
-            return  # NIfTI path ends here
+    def __len__(self) -> int:
+        return len(self.pairs)
 
-        # ------------------------------------------------------------------
-        # BACKEND: PNG mode
-        # ------------------------------------------------------------------
-        if os.path.exists(colab_img_dir) and os.path.exists(colab_lbl_dir):
-            print("[dataset] Using Colab-style layout")
-            self.imgs = sorted(glob.glob(os.path.join(colab_img_dir, "*.*png")), key=natural_sort_key)
-            self.lbls = sorted(glob.glob(os.path.join(colab_lbl_dir, "*.*png")), key=natural_sort_key)
+    @staticmethod
+    def _zscore(arr: np.ndarray) -> np.ndarray:
+        m = float(arr.mean())
+        s = float(arr.std())
+        if s == 0.0:
+            s = 1.0
+        return (arr - m) / s
 
-        elif os.path.exists(rangpur_img_dir) and os.path.exists(rangpur_lbl_dir):
-            print("[dataset] Using Rangpur layout")
-            self.imgs = sorted(glob.glob(os.path.join(rangpur_img_dir, "*.*png")), key=natural_sort_key)
-            self.lbls = sorted(glob.glob(os.path.join(rangpur_lbl_dir, "*.*png")), key=natural_sort_key)
-
-        else:
-            print(f"[dataset] WARNING: No dataset found under {self.root}. Using fake data.")
-            self.imgs, self.lbls = [], []
-
-        self.fake_mode = len(self.imgs) == 0
-        if self.fake_mode:
-            self.length = 8  # small dummy set
-
-    # ----------------------------------------------------------------------
-    # Standard Dataset methods
-    # ----------------------------------------------------------------------
-    def __len__(self):
-        return self.length if self.fake_mode else len(self.imgs)
-
-    def _remap_labels(self, lbl: np.ndarray) -> np.ndarray:
+    def _remap_labels(self, mask: np.ndarray) -> np.ndarray:
         """
-        Ensure labels are consecutive in [0, num_classes-1].
+        Map arbitrary integer labels to compact range [0..num_classes-1].
+        Extras are clipped to last class index.
         """
-        unique_vals = np.unique(lbl)
-        # already fine
-        if unique_vals.min() >= 0 and unique_vals.max() < self.num_classes:
-            return lbl
-        # small number of classes: remap
-        if len(unique_vals) <= self.num_classes:
-            remap = {v: i for i, v in enumerate(sorted(unique_vals))}
-            return np.vectorize(remap.get)(lbl).astype(np.int64)
-        # fallback: clip
-        return np.clip(lbl, 0, self.num_classes - 1).astype(np.int64)
+        uniq = np.unique(mask)
+        lut = {int(v): min(i, self.num_classes - 1) for i, v in enumerate(uniq)}
+        out = np.vectorize(lambda v: lut[int(v)])(mask).astype(np.int64)
+        return out
 
-    def __getitem__(self, idx):
-        # ---------------------- NIfTI backend ------------------------------
-        if self.backend == "nifti" and not self.fake_mode:
-            img = self.imgs[idx].astype(np.float32)
-            lbl = self.lbls[idx].astype(np.int64)
-            # if 3D-ish (H,W,1) squeeze
-            if img.ndim == 3 and img.shape[-1] == 1:
-                img = img[..., 0]
-            if lbl.ndim == 3 and lbl.shape[-1] == 1:
-                lbl = lbl[..., 0]
-
-            if self.norm:
-                img = (img - img.mean()) / (img.std() + 1e-8)
-
-            img = np.expand_dims(img, 0)  # (1,H,W)
-            lbl = self._remap_labels(lbl)
-            return torch.from_numpy(img), torch.from_numpy(lbl)
-
-        # ---------------------- fake backend -------------------------------
-        if self.fake_mode:
-            img = np.random.randn(1, 256, 256).astype(np.float32)
-            mask = np.random.randint(0, self.num_classes, size=(256, 256), dtype=np.int64)
-            return torch.from_numpy(img), torch.from_numpy(mask)
-
-        # ---------------------- PNG backend --------------------------------
-        img_path = self.imgs[idx]
-        lbl_path = self.lbls[idx]
-
-        img = Image.open(img_path).convert("L")
-        lbl = Image.open(lbl_path).convert("L")
-
-        img = np.array(img).astype(np.float32)
-        lbl = np.array(lbl).astype(np.int64)
-
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        img_path, lbl_path = self.pairs[idx]
+        img = np.asarray(Image.open(img_path).convert("L")).astype(np.float32)
         if self.norm:
-            img = (img - img.mean()) / (img.std() + 1e-8)
+            img = self._zscore(img)
+        img = np.expand_dims(img, axis=0)  # (1,H,W)
 
-        img = np.expand_dims(img, 0)  # (1,H,W)
-        lbl = self._remap_labels(lbl)
+        mask = np.asarray(Image.open(lbl_path))
+        mask = self._remap_labels(mask)
 
-        return torch.from_numpy(img), torch.from_numpy(lbl)
-
-    # ----------------------------------------------------------------------
-    # EXTRA UTILITIES
-    # ----------------------------------------------------------------------
-    def img_show(self, start_idx: int = 0, num: int = 3):
-        """
-        Plot a few samples from the dataset:
-          - original image
-          - label / mask
-
-        This is mainly for the README / markers.
-        """
-        import matplotlib.pyplot as plt
-
-        end_idx = min(start_idx + num, len(self))
-        for i in range(start_idx, end_idx):
-            img, lbl = self[i]
-            img = img.squeeze().numpy()
-            lbl = lbl.numpy()
-
-            plt.figure(figsize=(6, 3))
-            plt.subplot(1, 2, 1)
-            plt.imshow(img, cmap="gray")
-            plt.title(f"image [{i}]")
-            plt.axis("off")
-
-            plt.subplot(1, 2, 2)
-            plt.imshow(lbl, cmap="viridis", vmin=0, vmax=self.num_classes - 1)
-            plt.title(f"label [{i}]")
-            plt.axis("off")
-
-            plt.tight_layout()
-            plt.show()
+        return torch.from_numpy(img), torch.from_numpy(mask).long()
 
     def calculate_class_weights(self) -> torch.Tensor:
-        """
-        Iterate through the dataset and count how many pixels belong to each
-        class, then return inverse-frequency weights suitable for
-        nn.CrossEntropyLoss(weight=...).
-
-        Returns
-        -------
-        torch.Tensor
-            shape (num_classes,)
-        """
-        counts = np.zeros(self.num_classes, dtype=np.float64)
-
-        for i in range(len(self)):
-            _, lbl = self[i]
-            lbl_np = lbl.numpy()
-            for c in range(self.num_classes):
-                counts[c] += (lbl_np == c).sum()
-
-        # avoid div by zero
-        counts = np.maximum(counts, 1.0)
-        inv = 1.0 / counts
-        weights = inv / inv.sum() * self.num_classes
-        return torch.from_numpy(weights.astype(np.float32))
-
-# --------------------------------------------------------------------------
-# helpful: run this file directly to see shapes / plots
-# --------------------------------------------------------------------------
-if __name__ == "__main__":
-    ds = OASIS2DSegmentation(
-        root=guess_oasis_root(),
-        split="train",
-        norm=True,
-        num_classes=4,
-        backend="png",         # change to "nifti" once utils.py is in place
-    )
-    print("[main] root:", ds.root)
-    print("[main] length:", len(ds))
-    print("[main] fake_mode:", ds.fake_mode)
-
-    if not ds.fake_mode:
-        x, y = ds[0]
-        print("[main] sample image shape:", x.shape)
-        print("[main] sample label shape:", y.shape)
-
-        # show a few samples
-        ds.img_show(0, 3)
-
-        # print class weights
-        print("[main] class weights:", ds.calculate_class_weights())
-    else:
-        print("[main] dataset is in fake mode, please check your paths.")
+        """Compute inverse-frequency class weights for this split."""
+        counts = np.zeros(self.num_classes, dtype=np.int64)
+        for _, lbl_path in self.pairs:
+            m = np.asarray(Image.open(lbl_path))
+            m = self._remap_labels(m)
+            vals, cnt = np.unique(m, return_counts=True)
+            for v, c in zip(vals, cnt):
+                if v < self.num_classes:
+                    counts[v] += int(c)
+        counts = np.maximum(counts, 1)
+        inv = 1.0 / counts.astype(np.float64)
+        w = inv / inv.sum() * self.num_classes
+        return torch.tensor(w, dtype=torch.float32)
