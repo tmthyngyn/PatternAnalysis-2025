@@ -70,6 +70,7 @@ git clone https://github.com/tmthyngyn/PatternAnalysis-2025.git
 conda activate comp3710-oasis
 ```
 3. **[Install dependencies](#dependencies)** 
+
 4. **Download Brain MRI data**
 
 If available, access and retrieve the data from Rangpur Path: /home/groups/comp3710/OASIS.
@@ -121,6 +122,7 @@ You can learn more about the dataset at the [OASIS project page](https://sites.w
 ### Using the Scripts
 
 1. **Before running the scripts**
+
 Before running any of scripts remeber to [clone](#usage) the repository and change into the project directory.
 
 ```
@@ -156,6 +158,7 @@ Once this structure is in place, the scripts will automatically locate the data 
 The script should now be ready to run.
 
 2. **Training**
+
 To train the model, open a terminal or command prompt, navigate to the project directory (recognition/oasis_unet_timothy_nguyen), and execute the following command:
 
 ```
@@ -170,6 +173,7 @@ Training complete. Best Val Dice: 0.9221. Artifacts saved to: trained_models/oas
 ```
 
 3. **Predicting**
+
 Once the model has been successfully trained, you can generate predictions using the predict.py script. The model can be used to visualise the segmentation of a single example from the validation or test dataset. To do this, execute:
 
 ```
@@ -187,6 +191,7 @@ python predict.py --root ./OASIS --ckpt trained_models/oasis_unet/best_model.pth
 The script will iterate through all images in the specified split, compute Dice scores for each, and then generate three summary figures in outputs/gallery/: best.png, worst.png, and decent.png. These figures illustrate the input, ground truth, and predicted segmentations for the highest-scoring image, the lowest-scoring image, and one with a median Dice score respectively. Each figure includes the dataset index and the corresponding per-class and mean Dice scores in its title. To evaluate the model’s generalisation performance on unseen data, you can repeat the same command with --split test to analyse the test dataset.
 
 4. **Review**
+
 After training and prediction, your folder structure will include additional directories automatically created by the scripts. The final project directory will look like this:
 ```
 recognition/oasis_unet_timothy_nguyen/
