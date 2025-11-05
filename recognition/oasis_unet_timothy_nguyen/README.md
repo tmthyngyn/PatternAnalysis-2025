@@ -317,7 +317,7 @@ This sample demonstrates the model’s strong ability to delineate the ventricle
 
 #### Figure 2: Worse Performance Example
 
-![Worse](images/worse.png)
+![Worst](images/worst.png)
 ```
 Worst — idx 346 | mean Dice: 0.9360
 Per-class: C0: 0.999, C1: 0.861, C2: 0.935, C3: 0.949
